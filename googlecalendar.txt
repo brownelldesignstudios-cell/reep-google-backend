@@ -1,0 +1,2 @@
+calendarId: "YnJvd25lbGxkZXNpZ25zdHVkaW9zQGdtYWlsLmNvbQ@group.calendar.google.com", // <-- GOOGLE CALENDAR ID change later if you use a dedicated calendar
+      timeMin,
