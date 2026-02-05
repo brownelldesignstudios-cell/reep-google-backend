@@ -5,13 +5,8 @@ import { OAuth2Client } from "google-auth-library";
 import { google } from "googleapis";
 import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
 
 dotenv.config();
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 
 const app = express();
 app.use(express.json());
@@ -70,35 +65,6 @@ app.use((req, res, next) => {
 
   next();
 });
-
-
-// ---- REEP Phase 1: Job State Storage (best-effort: memory + local JSON) ----
-const JOB_STATE_FILE = path.join(__dirname, "job_state.json");
-let jobState = {};
-
-function loadJobState() {
-  try {
-    if (fs.existsSync(JOB_STATE_FILE)) {
-      jobState = JSON.parse(fs.readFileSync(JOB_STATE_FILE, "utf8"));
-    }
-  } catch (e) {
-    console.error("Failed to load job_state.json", e);
-    jobState = {};
-  }
-}
-
-function saveJobState() {
-  try {
-    fs.writeFileSync(JOB_STATE_FILE, JSON.stringify(jobState, null, 2));
-  } catch (e) {
-    console.error("Failed to save job_state.json", e);
-  }
-}
-
-loadJobState();
-
-const GHL_MARK_COMPLETE_WEBHOOK_URL =
-  process.env.GHL_MARK_COMPLETE_WEBHOOK_URL || "";
 
 // ---- OAuth client ----
 const oauth2Client = new OAuth2Client(
@@ -197,7 +163,7 @@ app.get("/auth/google/status", (req, res) => {
     connected: isConnected(),
     has_refresh_token: !!(tokenStore && tokenStore.refresh_token),
     calendar_id: GOOGLE_CALENDAR_ID,
-    note: "Tokens are stored in-memory only; restart requires re-auth.",
+    note: "Option A: tokens are in-memory only; restart requires re-auth.",
   });
 });
 
@@ -225,20 +191,39 @@ app.get("/api/jobs", async (req, res) => {
 
     const calendar = google.calendar({ version: "v3", auth: oauth2Client });
 
-    const resp = await calendar.events.list({
-      calendarId: GOOGLE_CALENDAR_ID,
-      timeMin,
-      timeMax,
-      singleEvents: true,
-      orderBy: "startTime",
-      maxResults: 250,
-    });
+    // Support selecting multiple calendars from the UI:
+    // ?calendar_ids=id1,id2,id3
+    const calendarIdsParam = req.query.calendar_ids || "";
+    const calendarIds = calendarIdsParam
+      ? String(calendarIdsParam)
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : [GOOGLE_CALENDAR_ID];
 
-    const items = resp.data.items || [];
+    // Fetch events from all requested calendars and merge results.
+    const results = await Promise.all(
+      calendarIds.map(async (calId) => {
+        const r = await calendar.events.list({
+          calendarId: calId,
+          timeMin,
+          timeMax,
+          singleEvents: true,
+          orderBy: "startTime",
+          maxResults: 250,
+        });
+        const items = r.data.items || [];
+        // Annotate calendar id for downstream use
+        return items.map((ev) => ({ ...ev, __calendarId: calId }));
+      })
+    );
+
+    const items = results.flat();
 
     const jobs = items.map((ev) => {
       const start = ev.start?.dateTime || ev.start?.date || null;
       const end = ev.end?.dateTime || ev.end?.date || null;
+      const calendar_id = ev.__calendarId || GOOGLE_CALENDAR_ID;
 
       return {
         job_id: ev.id,
@@ -248,12 +233,13 @@ app.get("/api/jobs", async (req, res) => {
         location: ev.location || "",
         description: ev.description || "",
         htmlLink: ev.htmlLink || "",
+        calendar_id,
       };
     });
 
     res.json({
       date: yyyyMmDd,
-      calendar_id: GOOGLE_CALENDAR_ID,
+      calendar_ids: calendarIds,
       count: jobs.length,
       jobs,
     });
@@ -343,58 +329,6 @@ app.get("/api/events", (req, res) => {
     res.status(500).json({ error: "Failed to read events" });
   }
 });
-
-// ---- Job State Persistence ----
-app.get("/api/job_state", (req, res) => {
-  const job_id = req.query.job_id;
-  if (!job_id) return res.status(400).json({ error: "job_id required" });
-  return res.json(jobState[job_id] || {});
-});
-
-app.post("/api/job_state", (req, res) => {
-  const { job_id, minutes, override_message } = req.body || {};
-  if (!job_id) return res.status(400).json({ error: "job_id required" });
-
-  const prev = jobState[job_id] || {};
-
-  jobState[job_id] = {
-    ...prev,
-    minutes: minutes ?? prev.minutes ?? {},
-    override_message: override_message ?? prev.override_message ?? null,
-    updated_at: new Date().toISOString(),
-  };
-
-  saveJobState();
-  return res.json({ ok: true });
-});
-
-// ---- Mark Complete Forwarder (to GHL Incoming Webhook) ----
-app.post("/api/mark_complete", async (req, res) => {
-  try {
-    if (!GHL_MARK_COMPLETE_WEBHOOK_URL) {
-      return res.status(500).json({ error: "GHL_MARK_COMPLETE_WEBHOOK_URL missing" });
-    }
-
-    const payload = req.body || {};
-
-    const r = await fetch(GHL_MARK_COMPLETE_WEBHOOK_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-
-    if (!r.ok) {
-      const t = await r.text();
-      return res.status(502).json({ error: "GHL webhook failed", detail: t });
-    }
-
-    return res.json({ ok: true });
-  } catch (e) {
-    console.error("mark_complete failed", e);
-    return res.status(500).json({ error: "mark_complete failed" });
-  }
-});
-
 
 app.listen(PORT, () => {
   console.log(`Server live on port ${PORT}`);
