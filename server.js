@@ -5,8 +5,13 @@ import { OAuth2Client } from "google-auth-library";
 import { google } from "googleapis";
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 
 dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 
 const app = express();
 app.use(express.json());
@@ -65,6 +70,35 @@ app.use((req, res, next) => {
 
   next();
 });
+
+
+// ---- REEP Phase 1: Job State Storage (best-effort: memory + local JSON) ----
+const JOB_STATE_FILE = path.join(__dirname, "job_state.json");
+let jobState = {};
+
+function loadJobState() {
+  try {
+    if (fs.existsSync(JOB_STATE_FILE)) {
+      jobState = JSON.parse(fs.readFileSync(JOB_STATE_FILE, "utf8"));
+    }
+  } catch (e) {
+    console.error("Failed to load job_state.json", e);
+    jobState = {};
+  }
+}
+
+function saveJobState() {
+  try {
+    fs.writeFileSync(JOB_STATE_FILE, JSON.stringify(jobState, null, 2));
+  } catch (e) {
+    console.error("Failed to save job_state.json", e);
+  }
+}
+
+loadJobState();
+
+const GHL_MARK_COMPLETE_WEBHOOK_URL =
+  process.env.GHL_MARK_COMPLETE_WEBHOOK_URL || "";
 
 // ---- OAuth client ----
 const oauth2Client = new OAuth2Client(
@@ -163,7 +197,7 @@ app.get("/auth/google/status", (req, res) => {
     connected: isConnected(),
     has_refresh_token: !!(tokenStore && tokenStore.refresh_token),
     calendar_id: GOOGLE_CALENDAR_ID,
-    note: "Option A: tokens are in-memory only; restart requires re-auth.",
+    note: "Tokens are stored in-memory only; restart requires re-auth.",
   });
 });
 
@@ -309,6 +343,58 @@ app.get("/api/events", (req, res) => {
     res.status(500).json({ error: "Failed to read events" });
   }
 });
+
+// ---- Job State Persistence ----
+app.get("/api/job_state", (req, res) => {
+  const job_id = req.query.job_id;
+  if (!job_id) return res.status(400).json({ error: "job_id required" });
+  return res.json(jobState[job_id] || {});
+});
+
+app.post("/api/job_state", (req, res) => {
+  const { job_id, minutes, override_message } = req.body || {};
+  if (!job_id) return res.status(400).json({ error: "job_id required" });
+
+  const prev = jobState[job_id] || {};
+
+  jobState[job_id] = {
+    ...prev,
+    minutes: minutes ?? prev.minutes ?? {},
+    override_message: override_message ?? prev.override_message ?? null,
+    updated_at: new Date().toISOString(),
+  };
+
+  saveJobState();
+  return res.json({ ok: true });
+});
+
+// ---- Mark Complete Forwarder (to GHL Incoming Webhook) ----
+app.post("/api/mark_complete", async (req, res) => {
+  try {
+    if (!GHL_MARK_COMPLETE_WEBHOOK_URL) {
+      return res.status(500).json({ error: "GHL_MARK_COMPLETE_WEBHOOK_URL missing" });
+    }
+
+    const payload = req.body || {};
+
+    const r = await fetch(GHL_MARK_COMPLETE_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    if (!r.ok) {
+      const t = await r.text();
+      return res.status(502).json({ error: "GHL webhook failed", detail: t });
+    }
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error("mark_complete failed", e);
+    return res.status(500).json({ error: "mark_complete failed" });
+  }
+});
+
 
 app.listen(PORT, () => {
   console.log(`Server live on port ${PORT}`);
