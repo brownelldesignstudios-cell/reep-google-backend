@@ -336,6 +336,10 @@ app.get("/api/events", (req, res) => {
   }
 });
 
+app.get("/today.html", (req, res) => res.sendFile(path.join(OPS_DIR, "today.html")));
+app.get("/complete.html", (req, res) => res.sendFile(path.join(OPS_DIR, "complete.html")));
+app.get("/admin.html", (req, res) => res.sendFile(path.join(OPS_DIR, "admin.html")));
+
 app.listen(PORT, () => {
   console.log(`Server live on port ${PORT}`);
   console.log(`Health: /health`);
