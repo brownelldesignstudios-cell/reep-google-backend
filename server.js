@@ -11,6 +11,12 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 app.use(cookieParser());
+const path = require("path");
+
+// Serve static ops pages (repo-relative from this server.js file)
+const OPS_DIR = path.join(__dirname, "..", "..", "02_OPS_PAGES");
+app.use(express.static(OPS_DIR));
+
 
 // ---- CONFIG ----
 const {
